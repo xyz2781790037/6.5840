@@ -101,20 +101,6 @@ func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
     return nil
 }
 
-// func (c *Coordinator) ReturnTask(args *TaskArgs, reply *TaskReply) error {
-//     c.mutex.Lock()
-//     defer c.mutex.Unlock()
-
-//     if args.Y == -1 && args.X >= 0 && args.X < len(c.mapTask) {
-//         c.mapTask[args.X].State = Completed
-//     }
-
-//     if args.X == -1 && args.Y >= 0 && args.Y < len(c.reduceTask) {
-//         c.reduceTask[args.Y].State = Completed
-//     }
-
-//     return nil
-// }
 func (c *Coordinator) ReturnTask(args *TaskArgs, reply *TaskReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -136,7 +122,6 @@ func (c *Coordinator) ReturnTask(args *TaskArgs, reply *TaskReply) error {
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
 	sockname := coordinatorSock()
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
