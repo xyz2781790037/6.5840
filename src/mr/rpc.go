@@ -14,16 +14,20 @@ import "strconv"
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
+type TaskArgs struct {
 	X int
 	Y int
-	fileName string
-	state TypeState
 	Type string
+}
+
+type TaskReply struct {
+	X int
+	Y int
+	FileName string
+	State TypeState
+	Type string
+	NReduce int
+	Nmap int
 }
 type TypeState int
 const (
