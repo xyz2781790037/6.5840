@@ -19,7 +19,10 @@ import (
 	"6.5840/raftapi"
 	"6.5840/tester1"
 )
-
+type LogEntry struct {
+    Term    int         // 该日志条目属于哪个任期（term）
+    Command interface{} // 客户端请求的命令（比如 “put x=5”）
+}
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -27,7 +30,7 @@ type Raft struct {
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
-	
+
 	currentTerm int
 
 	LeaderId int
@@ -38,8 +41,8 @@ type Raft struct {
 	lastHeartbeat   time.Time     // 最后心跳检测
 	electionTimeout time.Duration //正常超时时间
 	// Your data here (3A, 3B, 3C).
-	applyCh   chan raftapi.ApplyMsg
-	
+	applyCh chan raftapi.ApplyMsg
+	log []LogEntry
 	// state a Raft server must maintain.
 
 }
@@ -131,6 +134,8 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term >= rf.currentTerm {
 		rf.state = "follower"
 		if args.Term == rf.currentTerm && rf.votedFor == -1 {
@@ -188,13 +193,14 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// 检查是否应该启动领导者选举
 		rf.mu.Lock()
-		if time.Since(rf.lastHeartbeat) > rf.electionTimeout {
-			fmt.Println("id is",rf.me)
+		State := rf.state
+		lastTime := rf.lastHeartbeat
+		timeout := rf.electionTimeout
+		rf.mu.Unlock()
+		if time.Since(lastTime) > timeout && State != "leader"{
+			fmt.Println("id is", rf.me)
 			rf.startElection()
 		}
-		
-		rf.mu.Unlock()
-
 		ms := 150 + (rand.Int63() % 150)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
@@ -204,6 +210,7 @@ func (rf *Raft) resetElectionTimer() {
 	rf.lastHeartbeat = time.Now()
 }
 func (rf *Raft) startElection() {
+	rf.mu.Lock()
 	rf.currentTerm++
 	rf.state = "candidate"
 	rf.votes = 1
@@ -213,71 +220,100 @@ func (rf *Raft) startElection() {
 		MeId: rf.me,
 	}
 	rf.resetElectionTimer()
+	rf.mu.Unlock()
 	for i := 0; i < peerCount; i++ {
-		reply := RequestVoteReply{}
+
 		if i == rf.me {
 			continue
 		}
 		go func(server int) {
+			reply := RequestVoteReply{}
+
 			ok := rf.sendRequestVote(server, &args, &reply)
 			if ok {
+				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.state = "follower"
 					rf.lastHeartbeat = time.Now()
 					rf.votedFor = -1
+					rf.mu.Unlock()
 					return
 				}
-				rf.mu.Lock()
+				
 				rf.votes++
 				if rf.votes > peerCount/2 && rf.state == "candidate" {
-					fmt.Println("leader is",rf.me)
+					fmt.Println("leader is", rf.me)
 					rf.state = "leader"
 					rf.lastHeartbeat = time.Now()
-					go rf.sendAppendEntries()
+					rf.mu.Unlock()
+					rf.sendAppendEntries()
+				}else{
+					rf.mu.Unlock()
 				}
-				rf.mu.Unlock()
 			}
 		}(i)
 	}
 }
+
 type AppendEntriesArgs struct {
-	Term int
-	LeaderId     int
+	Term     int
+	LeaderId int
 }
 type AppendEntriesReply struct {
-	Term int
+	Term    int
 	Success bool
 }
-func (rf *Raft)sendAppendEntries(){
-	args := AppendEntriesArgs{}
 
-	for i:= 0;i < len(rf.peers);i++{
-		reply := AppendEntriesReply{}
-		ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
-		if ok{
-			if reply.Term > rf.currentTerm && !reply.Success {
-				fmt.Println("heartBeat failed")
+func (rf *Raft) sendAppendEntries() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+		term := rf.currentTerm
+		leadId := rf.me
+		rf.mu.Unlock()
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			args := AppendEntriesArgs{
+				Term: term,
+				LeaderId: leadId,
+			}
+			reply := AppendEntriesReply{}
+			ok := rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+			if ok {
+				if reply.Term > term && !reply.Success {
+					rf.mu.Lock()
+					rf.currentTerm = reply.Term
+					rf.state = "follower"
+					rf.votedFor = -1
+					fmt.Println("heartBeat failed")
+					rf.mu.Unlock()
+					return
+				}
 			}
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	term := rf.currentTerm
 	defer rf.mu.Unlock()
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
+	reply.Term = term
+	if args.Term < term {
 		reply.Success = false
 		return
 	}
 
-	if args.Term > rf.currentTerm {
+	if args.Term > term {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = "follower"
 	}
 	rf.resetElectionTimer()
 	reply.Success = true
+
 }
 
 func Make(peers []*labrpc.ClientEnd, me int,
@@ -290,11 +326,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	ms := time.Duration(150+(rand.Int63()%150)) * time.Millisecond
-	fmt.Println("election time is",ms)
+	fmt.Println("election time is", ms)
 	rf.electionTimeout = ms
 	// Your initialization code here (3A, 3B, 3C).
 	//3B
 	rf.applyCh = applyCh
+	rf.log = make([]LogEntry, 0)
 	// persister.Save()
 	// state := make([]byte,1)
 	// state = append(state, rf)
