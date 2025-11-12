@@ -158,86 +158,115 @@ func (rf *Raft) sendInstallSnapshot(server int) {
 	}
 	rf.mu.Lock()
 	if reply.Term > rf.currentTerm {
+		inTerm := rf.currentTerm
 		rf.currentTerm = reply.Term
+		slog.Debug("Dead in \033[36msendInstallSnapshot\033[0m", "old status", rf.state, "Id", rf.me, "inTerm", reply.Term, "myTerm", inTerm)
 		rf.state = "follower"
-		slog.Info("Dead in \033[36msendInstallSnapshot\033[0m", "old status", rf.state, "Id", rf.me, "inTerm", reply.Term, "outTerm", rf.currentTerm)
 		rf.votedFor = -1
 		rf.persist()
 		rf.mu.Unlock()
 		return
 	}
 
-	// rf.nextIndex[server] = args.LastIncludedIndex + 1
-	// rf.matchIndex[server] = args.LastIncludedIndex
-	// rf.updateCommitIndex()
 	if args.LastIncludedIndex > rf.matchIndex[server] {
 		old := rf.matchIndex[server]
 		rf.matchIndex[server] = args.LastIncludedIndex
 		rf.nextIndex[server] = args.LastIncludedIndex + 1
-		slog.Info("\033[35msendInstallSnapshot\033[0m: update matchIndex","Status",rf.state ,"server", server, "old", old, "new", rf.matchIndex[server])
+		slog.Debug("\033[35msendInstallSnapshot\033[0m: update matchIndex", "Status", rf.state, "server", server, "old", old, "new", rf.matchIndex[server])
 		if rf.state == "leader" {
 			rf.mu.Unlock()
 			rf.updateCommitIndex()
-			slog.Info("\033[1;33mfrom sendInstallSnapshot to updata CommitIndex\033[0m")
-		}else{
+			slog.Debug("\033[1;33mfrom sendInstallSnapshot to updata CommitIndex\033[0m")
+		} else {
 			rf.mu.Unlock()
 		}
-	}else{
+	} else {
 		rf.mu.Unlock()
 	}
 
 }
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	rf.mu.Lock()
+    rf.mu.Lock()
 
-	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		rf.mu.Unlock()
-		return
-	}
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.state = "follower"
-		slog.Info("Dead \033[36mInstallSnapshot\033[0m", "old status", rf.state, "Id", rf.me)
-		rf.votedFor = -1
-		rf.persist()
-	}
-	rf.resetElectionTimer()
+    reply.Term = rf.currentTerm
+    if args.Term < rf.currentTerm {
+        rf.mu.Unlock()
+        return
+    }
+    
+    if args.Term > rf.currentTerm {
+        rf.currentTerm = args.Term
+        rf.state = "follower"
+        rf.votedFor = -1
+        rf.persist()
+    }
+    
+    rf.resetElectionTimer()
 
-	if args.LastIncludedIndex <= rf.lastIncludedIndex {
-		rf.mu.Unlock()
-		return
-	}
+    if args.LastIncludedIndex <= rf.lastIncludedIndex {
+        rf.mu.Unlock()
+        return
+    }
 
-	oldLastIncludedIndex := rf.lastIncludedIndex
-	rf.lastIncludedIndex = args.LastIncludedIndex
-	rf.lastIncludedTerm = args.LastIncludedTerm
+    // 记录旧状态用于调试
+    oldLastApplied := rf.lastApplied
+    oldCommitIndex := rf.commitIndex
+    oldLastIncludedIndex := rf.lastIncludedIndex
 
-	newLog := []Log{{Term: args.LastIncludedTerm}}
-	startIdx := args.LastIncludedIndex + 1
-	sliceStart := startIdx - oldLastIncludedIndex
+    // 原子性更新所有状态
+    rf.lastIncludedIndex = args.LastIncludedIndex
+    rf.lastIncludedTerm = args.LastIncludedTerm
 
-	if sliceStart >= 0 && sliceStart < len(rf.log) {
-		newLog = append(newLog, rf.log[sliceStart:]...)
-	}
-	rf.log = newLog
+    // 重建日志
+    newLog := []Log{{Term: args.LastIncludedTerm}}
+    startIdx := args.LastIncludedIndex + 1
+    sliceStart := startIdx - oldLastIncludedIndex
 
-	rf.commitIndex = args.LastIncludedIndex
-	rf.lastApplied = args.LastIncludedIndex
-	slog.Info("follower recover \033[1;35mInstallSnapshot\033[0m", "commitIndex=lastApplied", rf.commitIndex, "log", rf.log)
-	rf.persister.Save(rf.encodeRaftState(), args.Data)
+    if sliceStart >= 0 && sliceStart < len(rf.log) {
+        newLog = append(newLog, rf.log[sliceStart:]...)
+    }
+    rf.log = newLog
 
-	msg := raftapi.ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotTerm:  args.LastIncludedTerm,
-		SnapshotIndex: args.LastIncludedIndex,
-	}
-	rf.mu.Unlock()
+    // 关键修复：确保状态一致性
+    if rf.commitIndex < args.LastIncludedIndex {
+        rf.commitIndex = args.LastIncludedIndex
+    }
+    if rf.lastApplied < args.LastIncludedIndex {
+        rf.lastApplied = args.LastIncludedIndex
+    }
+    
+    // 确保不会超过当前日志范围
+    lastLogIndex := rf.getLastLogIndex()
+    if rf.commitIndex > lastLogIndex {
+        rf.commitIndex = lastLogIndex
+    }
+    if rf.lastApplied > lastLogIndex {
+        rf.lastApplied = lastLogIndex
+    }
 
-	go func() { rf.applyCh <- msg }()
+    slog.Debug("InstallSnapshot: state updated", 
+        "server", rf.me,
+        "oldLastApplied", oldLastApplied,
+        "newLastApplied", rf.lastApplied,
+        "oldCommitIndex", oldCommitIndex, 
+        "newCommitIndex", rf.commitIndex,
+        "oldLastIncluded", oldLastIncludedIndex,
+        "newLastIncluded", rf.lastIncludedIndex,
+        "newLogLen", len(rf.log))
+
+    rf.persister.Save(rf.encodeRaftState(), args.Data)
+
+    msg := raftapi.ApplyMsg{
+        SnapshotValid: true,
+        Snapshot:      args.Data,
+        SnapshotTerm:  args.LastIncludedTerm,
+        SnapshotIndex: args.LastIncludedIndex,
+    }
+    rf.mu.Unlock()
+
+    // 同步发送快照消息，确保顺序
+    rf.applyCh <- msg
 }
-
 // the service says it has created a snapshot that has all Debug up to and including index. this means the service no longer needs the log through (and including) that index. Raft should now trim its log as much as possible.
 // 服务表示它已经创建了一个包含所有调试信息（直到索引）的快照。这意味着服务不再需要该索引（包括该索引）的日志。Raft 现在应该尽可能多地修剪其日志。
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
@@ -252,7 +281,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if sliceIndex < 0 || sliceIndex >= len(rf.log) {
 		return
 	}
-	slog.Info("\033[1;32mold status\033[0m", "log", rf.log[sliceIndex:])
+	slog.Debug("\033[1;32mold status\033[0m", "log", rf.log[sliceIndex:])
 	rf.lastIncludedTerm = rf.log[sliceIndex].Term
 	rf.lastIncludedIndex = index
 
@@ -262,7 +291,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		newLog = append(newLog, rf.log[sliceIndex+1:]...)
 	}
 	rf.log = newLog
-	slog.Info("\033[1;32mnew status\033[0m", "new log", rf.log)
+	slog.Debug("\033[1;32mnew status\033[0m", "new log", rf.log)
 	// 更新 commitIndex 和 lastApplied
 	if rf.commitIndex < index {
 		rf.commitIndex = index
@@ -285,7 +314,12 @@ func (rf *Raft) getLastLogTerm() int {
 }
 
 func (rf *Raft) logIndexToSliceIndex(logIndex int) int {
-	return logIndex - rf.lastIncludedIndex
+    if logIndex < rf.lastIncludedIndex {
+        slog.Error("logIndexToSliceIndex: logIndex < lastIncludedIndex", 
+            "logIndex", logIndex, "lastIncludedIndex", rf.lastIncludedIndex)
+        return -1
+    }
+    return logIndex - rf.lastIncludedIndex
 }
 func (rf *Raft) getLogTerm(logIndex int) int {
 	if logIndex < rf.lastIncludedIndex {
@@ -326,10 +360,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		slog.Debug("Dead in \033[36mRequestVote\033[0m", "old status", rf.state, "Id", rf.me)
+		rf.state = "follower"
 		rf.votedFor = -1
 		rf.persist()
-		rf.state = "follower"
-		slog.Info("Dead in \033[36mRequestVote\033[0m", "old status", rf.state, "Id", rf.me)
 	}
 
 	myLastIndex := rf.getLastLogIndex()
@@ -343,7 +377,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		rf.persist()
 		reply.VoteGranted = true
-		rf.resetElectionTimer()
+		slog.Debug("\033[1;35mvote for\033[0m", "me", rf.me, "ID", rf.votedFor)
+		// rf.resetElectionTimer()
 	}
 }
 
@@ -395,12 +430,12 @@ func (rf *Raft) ticker() {
 		if time.Since(lastTime) > timeout && State != "leader" {
 			rf.startElection()
 		}
-		ms := 150 + (rand.Int63() % 150)
+		ms := 150 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 func (rf *Raft) resetElectionTimer() {
-	rf.electionTimeout = time.Duration(150+rand.Int63()%150) * time.Millisecond
+	rf.electionTimeout = time.Duration(150+rand.Int63()%300) * time.Millisecond
 	rf.lastHeartbeat = time.Now()
 }
 func (rf *Raft) startElection() {
@@ -440,8 +475,8 @@ func (rf *Raft) startElection() {
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.persist()
+					slog.Debug("Dead \033[36mstartElection\033[0m", "old status", rf.state, "Id", rf.me)
 					rf.state = "follower"
-					slog.Info("Dead \033[36mstartElection\033[0m", "old status", rf.state, "Id", rf.me)
 					rf.votedFor = -1
 					rf.persist()
 					return
@@ -452,7 +487,7 @@ func (rf *Raft) startElection() {
 				if reply.VoteGranted {
 					atomic.AddInt32(&votes, 1)
 					if atomic.LoadInt32(&votes) > int32(len(rf.peers)/2) {
-						slog.Info("New leader success", "leader", rf.me)
+						slog.Debug("New leader success", "leader", rf.me)
 						rf.state = "leader"
 						for m := range rf.peers {
 							rf.nextIndex[m] = rf.getLastLogIndex() + 1
@@ -467,7 +502,6 @@ func (rf *Raft) startElection() {
 		}(i)
 	}
 }
-
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
@@ -521,7 +555,7 @@ func (rf *Raft) sendAppendEntries() {
 					return
 				}
 				if prevIndex > rf.getLastLogIndex() {
-					// 如果 prevIndex 超出范围，重置为最后一个日志索引
+
 					rf.nextIndex[server] = rf.getLastLogIndex() + 1
 					rf.mu.Unlock()
 					return
@@ -529,7 +563,7 @@ func (rf *Raft) sendAppendEntries() {
 				prevTerm := rf.getLogTerm(prevIndex)
 				if prevTerm == -1 {
 					rf.mu.Unlock()
-					rf.sendInstallSnapshot(server)
+					go rf.sendInstallSnapshot(server)
 					return
 				}
 
@@ -539,6 +573,13 @@ func (rf *Raft) sendAppendEntries() {
 					if sliceStart >= 0 && sliceStart < len(rf.log) {
 						entries = make([]Log, len(rf.log[sliceStart:]))
 						copy(entries, rf.log[sliceStart:])
+					} else {
+						slog.Error("sendAppendEntries: invalid sliceStart",
+							"server", server,
+							"nextIndex", rf.nextIndex[server],
+							"sliceStart", sliceStart,
+							"logLen", len(rf.log),
+							"lastIncluded", rf.lastIncludedIndex)
 					}
 				} else {
 					entries = nil
@@ -562,10 +603,10 @@ func (rf *Raft) sendAppendEntries() {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
+					slog.Debug("Dead \033[36msendAppendEntires\033[0m", "old status", rf.state, "Id", rf.me)
 					rf.votedFor = -1
-					rf.persist()
 					rf.state = "follower"
-					slog.Info("Dead \033[36msendAppendEntires\033[0m", "old status", rf.state, "Id", rf.me)
+					rf.persist()
 					rf.mu.Unlock()
 					return
 				}
@@ -577,15 +618,14 @@ func (rf *Raft) sendAppendEntries() {
 					old := rf.matchIndex[server]
 					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
-					
-					if rf.matchIndex[server] > old && rf.state == "leader"{
+
+					if rf.matchIndex[server] > old && rf.state == "leader" {
 						rf.mu.Unlock()
 						rf.updateCommitIndex()
-						slog.Info("\033[1;33mfrom sendAppendEntries to updata CommitIndex\033[0m","ID",rf.me)
+						slog.Debug("\033[1;33mfrom sendAppendEntries to updata CommitIndex\033[0m", "ID", rf.me)
 						rf.mu.Lock()
 					}
-					
-					
+
 				} else {
 					if reply.XTerm == -1 {
 						rf.nextIndex[server] = reply.XLen
@@ -607,14 +647,14 @@ func (rf *Raft) sendAppendEntries() {
 					if rf.nextIndex[server] < rf.lastIncludedIndex+1 {
 						rf.nextIndex[server] = rf.lastIncludedIndex + 1
 					}
-					
+
 				}
 				rf.mu.Unlock()
 			}(server)
 
 		}
 
-		time.Sleep(35 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 func (rf *Raft) updateCommitIndex() {
@@ -633,7 +673,7 @@ func (rf *Raft) updateCommitIndex() {
 		if count > len(rf.peers)/2 {
 			old := rf.commitIndex
 			rf.commitIndex = N
-			slog.Info("\033[34mupdateCommtIndex\033[0m", "new", rf.commitIndex, "old", old)
+			slog.Debug("\033[34mupdateCommtIndex\033[0m", "new", rf.commitIndex, "old", old)
 			break
 		}
 	}
@@ -650,10 +690,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		slog.Debug("Dead \033[36mAppendEntries\033[0m", "old status", rf.state, "Id", rf.me)
 		rf.votedFor = -1
-		rf.persist()
 		rf.state = "follower"
-		slog.Info("Dead \033[36mAppendEntries\033[0m", "old status", rf.state, "Id", rf.me)
+		rf.persist()
 	}
 
 	rf.resetElectionTimer()
@@ -681,25 +721,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.XIndex = conflictIndex
 		return
 	}
-	for i, entry := range args.Entries {
-		entryIndex := args.PrevLogIndex + 1 + i
-		entrySliceIndex := rf.logIndexToSliceIndex(entryIndex)
+	 for i, entry := range args.Entries {
+        entryIndex := args.PrevLogIndex + 1 + i
+        entrySliceIndex := rf.logIndexToSliceIndex(entryIndex)
 
-		if entrySliceIndex < len(rf.log) {
-			if rf.log[entrySliceIndex].Term != entry.Term {
-				// 发现冲突，截断日志
-				rf.log = rf.log[:entrySliceIndex]
-				rf.log = append(rf.log, args.Entries[i:]...)
-				rf.persist()
-				break
-			}
-		} else {
-			// 直接追加剩余条目
-			rf.log = append(rf.log, args.Entries[i:]...)
-			rf.persist()
-			break
-		}
-	}
+        if entrySliceIndex < 0 {
+            // 无效索引，需要安装快照
+            reply.Success = false
+            reply.XTerm = -1
+            reply.XLen = rf.lastIncludedIndex + 1
+            return
+        }
+
+        if entrySliceIndex < len(rf.log) {
+            if rf.log[entrySliceIndex].Term != entry.Term {
+                // 发现冲突，截断日志
+                rf.log = rf.log[:entrySliceIndex]
+                rf.log = append(rf.log, args.Entries[i:]...)
+                rf.persist()
+                slog.Debug("AppendEntries: log conflict resolved", 
+                    "server", rf.me, "entryIndex", entryIndex, "conflictTerm", rf.log[entrySliceIndex].Term)
+                break
+            }
+        } else {
+            // 直接追加剩余条目
+            rf.log = append(rf.log, args.Entries[i:]...)
+            rf.persist()
+            slog.Debug("AppendEntries: appended new entries", 
+                "server", rf.me, "fromIndex", entryIndex, "entriesCount", len(args.Entries)-i)
+            break
+        }
+    }
 	if args.LeaderCommit > rf.commitIndex {
 		lastNewEntry := args.PrevLogIndex + len(args.Entries)
 		if args.LeaderCommit < lastNewEntry {
@@ -747,38 +799,63 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) applier() {
     for !rf.killed() {
         rf.mu.Lock()
-
-        // 应用所有已提交但未应用的日志条目
-        var applyMsgs []raftapi.ApplyMsg
-        for rf.lastApplied < rf.commitIndex {
-            rf.lastApplied++
-            applyIndex := rf.lastApplied
-
-            // 检查是否在快照范围内
-            if applyIndex <= rf.lastIncludedIndex {
-                continue
-            }
-
-            sliceIndex := rf.logIndexToSliceIndex(applyIndex)
-            if sliceIndex < 0 || sliceIndex >= len(rf.log) {
-                // 如果索引超出范围，可能是状态不一致，重置 lastApplied
-                rf.lastApplied = applyIndex - 1
-                break
-            }
-
-            msg := raftapi.ApplyMsg{
-                CommandValid: true,
-                Command:      rf.log[sliceIndex].Command,
-                CommandIndex: applyIndex,
-            }
-            applyMsgs = append(applyMsgs, msg)
+        
+        if rf.lastApplied < rf.lastIncludedIndex {
+            rf.lastApplied = rf.lastIncludedIndex
+            rf.mu.Unlock()
+            continue
         }
+
+        if rf.lastApplied >= rf.commitIndex {
+            rf.mu.Unlock()
+            time.Sleep(10 * time.Millisecond)
+            continue
+        }
+
+        applyIndex := rf.lastApplied + 1
+
+        if applyIndex <= rf.lastIncludedIndex {
+            rf.lastApplied = rf.lastIncludedIndex
+            rf.mu.Unlock()
+            continue
+        }
+        
+        if applyIndex > rf.commitIndex {
+            rf.mu.Unlock()
+            continue
+        }
+
+        sliceIndex := applyIndex - rf.lastIncludedIndex
+        if sliceIndex < 0 || sliceIndex >= len(rf.log) {
+            slog.Error("applier: index out of range", 
+                "applyIndex", applyIndex, 
+                "sliceIndex", sliceIndex, 
+                "logLen", len(rf.log), 
+                "lastIncluded", rf.lastIncludedIndex)
+            rf.mu.Unlock()
+            time.Sleep(10 * time.Millisecond)
+            continue
+        }
+
+        msg := raftapi.ApplyMsg{
+            CommandValid: true,
+            Command:      rf.log[sliceIndex].Command,
+            CommandIndex: applyIndex,
+        }
+        
+        slog.Debug("applier: applying command", 
+            "server", rf.me, 
+            "index", applyIndex, 
+            "command", rf.log[sliceIndex].Command,
+            "lastApplied", rf.lastApplied,
+            "commitIndex", rf.commitIndex)
+
+        rf.lastApplied = applyIndex
+        
         rf.mu.Unlock()
 
-        for _, msg := range applyMsgs {
-            rf.applyCh <- msg
-        }
-
+        rf.applyCh <- msg
+        
         time.Sleep(10 * time.Millisecond)
     }
 }
