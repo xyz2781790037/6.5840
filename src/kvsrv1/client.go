@@ -24,40 +24,6 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
 // args 和 reply 的类型（包括它们是否为指针）必须与 RPC 处理函数声明的参数类型匹配。此外，reply 必须作为指针传递。
 
-// func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-// 	// You will have to modify this function.
-// 	args := rpc.GetArgs{Key: key}
-// 	reply := rpc.GetReply{}
-// 	ok := ck.clnt.Call(ck.server,"KVServer.Get",&args,&reply)
-// 	if ok {
-// 		if reply.Err != rpc.OK{
-// 			return "",0,reply.Err
-// 		}
-// 	} else {
-// 		fmt.Printf("call Get() failed\n")
-// 		return "", 0, rpc.ErrNoKey
-// 	}
-// 	return reply.Value,reply.Version,reply.Err
-// }
-
-// func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-// 	// You will have to modify this function.
-// 	args := rpc.PutArgs{Key: key,Value: value,Version :version,}
-// 	reply := rpc.PutReply{}
-// 	for{
-// 		ok := ck.clnt.Call(ck.server,"KVServer.Put",&args,&reply)
-// 		if ok {
-// 			if reply.Err != rpc.OK{
-// 				return reply.Err
-// 			}
-// 		} else {
-// 			fmt.Printf("call Put() failed\n")
-// 			return rpc.ErrNoKey
-// 		}
-// 	}
-
-//		return rpc.OK
-//	}
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
 

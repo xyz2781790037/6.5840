@@ -108,12 +108,6 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-// how many bytes in Raft's persisted log?
-func (rf *Raft) PersistBytes() int {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.persister.RaftStateSize()
-}
 
 type InstallSnapshotArgs struct {
 	Term              int
@@ -661,9 +655,9 @@ func (rf *Raft) updateCommitIndex() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	for N := rf.getLastLogIndex(); N > rf.commitIndex; N-- {
-		if rf.getLogTerm(N) != rf.currentTerm {
-			continue
-		}
+		// if rf.getLogTerm(N) != rf.currentTerm {
+		// 	continue
+		// }
 		count := 1
 		for j := range rf.peers {
 			if j != rf.me && rf.matchIndex[j] >= N {
