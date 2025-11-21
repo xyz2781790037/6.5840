@@ -8,24 +8,54 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/tester1"
-
+	"sync"
+	"reflect"
 )
 
 type KVServer struct {
 	me   int
 	dead int32 // set by Kill()
 	rsm  *rsm.RSM
-
 	// Your definitions here.
+	mu      sync.Mutex
+	data    map[string]string
+	version map[string]rpc.Tversion
 }
 
-// To type-cast req to the right type, take a look at Go's type switches or type
-// assertions below:
-//
 // https://go.dev/tour/methods/16
 // https://go.dev/tour/methods/15
 func (kv *KVServer) DoOp(req any) any {
-	// Your code here
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	// 核弹级防 panic 神器（治愈所有 reflect 病）
+	rv := reflect.ValueOf(req)
+	if rv.Kind() != reflect.Pointer {
+		ptr := reflect.New(rv.Type())
+		ptr.Elem().Set(rv)
+		req = ptr.Interface()
+	}
+
+	switch args := req.(type) {
+	case *rpc.GetArgs:
+		val, ok := kv.data[args.Key]
+		if !ok {
+			return rpc.GetReply{Err: rpc.ErrNoKey}
+		}
+		ver := kv.version[args.Key]
+		return rpc.GetReply{Value: val, Version: ver, Err: rpc.OK}
+	case *rpc.PutArgs:
+		ver, ok := kv.version[args.Key]
+		if !ok {
+			ver = 0
+		}
+		if args.Version != ver {
+			return rpc.PutReply{Err: rpc.ErrVersion}
+		}
+		kv.data[args.Key] = args.Value
+		kv.version[args.Key] = ver + 1
+		return rpc.PutReply{Err: rpc.OK}
+	}
 	return nil
 }
 
@@ -39,15 +69,33 @@ func (kv *KVServer) Restore(data []byte) {
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	// Your code here. Use kv.rsm.Submit() to submit args
-	// You can use go's type casts to turn the any return value
-	// of Submit() into a GetReply: rep.(rpc.GetReply)
+	err, rep := kv.rsm.Submit(args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	if rep == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	r := rep.(rpc.GetReply)
+	reply.Value = r.Value
+	reply.Version = r.Version
+	reply.Err = r.Err
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Your code here. Use kv.rsm.Submit() to submit args
-	// You can use go's type casts to turn the any return value
-	// of Submit() into a PutReply: rep.(rpc.PutReply)
+	err, rep := kv.rsm.Submit(args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	if rep == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	r := rep.(rpc.PutReply)
+	reply.Err = r.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -81,6 +129,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
+	kv.data = make(map[string]string)
+	kv.version = make(map[string]rpc.Tversion)
 	// You may need initialization code here.
 	return []tester.IService{kv, kv.rsm.Raft()}
 }

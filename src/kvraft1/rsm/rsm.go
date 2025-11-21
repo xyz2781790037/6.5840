@@ -18,8 +18,7 @@ type Op struct {
 	OpType   string
 	Key      string
 	Value    string
-	ClientId int64
-	SeqNum   int64
+	Version   rpc.Tversion
 }
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
@@ -120,15 +119,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 			}
 			return rpc.OK, result
 
-		case <-ticker.C:
-			// 定期检查是否还是领导者
-			if _, isLeader := rsm.rf.GetState(); !isLeader {
-				rsm.mu.Lock()
-				delete(rsm.waitChs, index)
-				rsm.mu.Unlock()
-				return rpc.ErrWrongLeader, nil
-			}
-
 		case <-timeout:
 			rsm.mu.Lock()
 			delete(rsm.waitChs, index)
@@ -181,8 +171,7 @@ func (rsm *RSM) isSameOperation(op1, op2 any) bool {
 			return o1.OpType == o2.OpType &&
 				o1.Key == o2.Key &&
 				o1.Value == o2.Value &&
-				o1.ClientId == o2.ClientId &&
-				o1.SeqNum == o2.SeqNum
+				o1.Version == o2.Version
 		}
 	}
 	return false
